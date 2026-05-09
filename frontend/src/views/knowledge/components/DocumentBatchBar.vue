@@ -9,6 +9,8 @@ defineProps<{
 const emit = defineEmits<{
   (e: 'clear'): void;
   (e: 'delete'): void;
+  (e: 'rebuild'): void;
+  (e: 'move'): void;
 }>();
 
 const { t } = useI18n();
@@ -25,6 +27,26 @@ const { t } = useI18n();
           </t-button>
         </div>
         <div class="batch-bar-actions">
+          <t-button
+            theme="default"
+            variant="outline"
+            size="small"
+            :loading="loading"
+            @click="emit('rebuild')"
+          >
+            <template #icon><t-icon name="refresh" size="14px" /></template>
+            {{ t('knowledgeBase.batchRebuild') }}
+          </t-button>
+          <t-button
+            theme="default"
+            variant="outline"
+            size="small"
+            :loading="loading"
+            @click="emit('move')"
+          >
+            <template #icon><t-icon name="swap" size="14px" /></template>
+            {{ t('knowledgeBase.batchMove') }}
+          </t-button>
           <t-button
             theme="danger"
             variant="outline"

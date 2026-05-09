@@ -162,6 +162,10 @@ export function updateManualKnowledge(id: string, data: { title: string; content
   return put(`/api/v1/knowledge/manual/${id}`, data);
 }
 
+export function updateKnowledge(id: string, data: { title?: string; description?: string }) {
+  return put(`/api/v1/knowledge/${id}`, data);
+}
+
 export function reparseKnowledge(id: string) {
   return post(`/api/v1/knowledge/${id}/reparse`);
 }

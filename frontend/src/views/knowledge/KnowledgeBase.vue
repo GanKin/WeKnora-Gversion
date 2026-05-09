@@ -29,6 +29,7 @@ import {
   listKnowledgeBases,
   reparseKnowledge,
   batchDeleteKnowledge,
+  updateKnowledge,
 } from "@/api/knowledge-base/index";
 import FAQEntryManager from './components/FAQEntryManager.vue';
 import DocumentListView from './components/DocumentListView.vue';
@@ -256,6 +257,10 @@ let timeout: ReturnType<typeof setTimeout> | null = null;
 let delDialog = ref(false)
 let rebuildDialog = ref(false)
 let rebuildKnowledgeItem = ref<KnowledgeCard>({ id: '', parse_status: '' })
+let renameDialog = ref(false)
+let renameItem = ref<KnowledgeCard>({ id: '', parse_status: '' })
+let renameName = ref('')
+let renameSubmitting = ref(false)
 let knowledge = ref<KnowledgeCard>({ id: '', parse_status: '' })
 let knowledgeIndex = ref(-1)
 let knowledgeScroll = ref()
@@ -292,6 +297,15 @@ const selectedIds = ref<Set<string>>(new Set());
 let lastSelectedIndex = -1;
 const batchDeleteDialog = ref(false);
 const batchDeleting = ref(false);
+const batchRebuildDialog = ref(false);
+const batchRebuilding = ref(false);
+const batchMoveDialog = ref(false);
+const batchMoveSubmitting = ref(false);
+const batchMoveTargets = ref<any[]>([]);
+const batchMoveTargetsLoading = ref(false);
+const batchMoveSelectedTargetId = ref('');
+const batchMoveSelectedTargetName = ref('');
+const batchMoveMode = ref<'reuse_vectors' | 'reparse'>('reuse_vectors');
 
 const selectedTagId = ref<string>('');
 const tagList = ref<any[]>([]);
@@ -1687,13 +1701,125 @@ const confirmBatchDelete = async () => {
   }
 };
 
+// Batch rebuild: confirm dialog, then loop call reparseKnowledge for each selected item
+const openBatchRebuildDialog = () => {
+  if (selectedIds.value.size === 0) return;
+  batchRebuildDialog.value = true;
+};
+
+const confirmBatchRebuild = async () => {
+  if (batchRebuilding.value || selectedIds.value.size === 0) return;
+  const ids = Array.from(selectedIds.value);
+  batchRebuilding.value = true;
+  batchRebuildDialog.value = false;
+  try {
+    // Fire all reparse requests (backend queues them)
+    const results = await Promise.allSettled(ids.map(id => reparseKnowledge(id)));
+    const failedCount = results.filter(r => r.status === 'rejected').length;
+    if (failedCount === 0) {
+      MessagePlugin.success(t('knowledgeBase.batchRebuildSuccess', { count: ids.length }));
+    } else {
+      MessagePlugin.warning(t('knowledgeBase.batchRebuildPartial', { success: ids.length - failedCount, failed: failedCount }));
+    }
+    clearSelection();
+    page = 1;
+    loadKnowledgeFiles(kbId.value);
+    scheduleWikiStatusProbes();
+  } catch (e: any) {
+    MessagePlugin.error(e?.message || t('knowledgeBase.batchRebuildFailed'));
+  } finally {
+    batchRebuilding.value = false;
+  }
+};
+
+// Batch move: open dialog with target KB selection
+const openBatchMoveDialog = async () => {
+  if (selectedIds.value.size === 0) return;
+  batchMoveSelectedTargetId.value = '';
+  batchMoveSelectedTargetName.value = '';
+  batchMoveMode.value = 'reuse_vectors';
+  batchMoveDialog.value = true;
+  batchMoveTargetsLoading.value = true;
+  batchMoveTargets.value = [];
+  try {
+    const res: any = await listMoveTargets(kbId.value);
+    batchMoveTargets.value = res.data || [];
+  } catch {
+    batchMoveTargets.value = [];
+  } finally {
+    batchMoveTargetsLoading.value = false;
+  }
+};
+
+const handleBatchMoveSelectTarget = (kb: any) => {
+  batchMoveSelectedTargetId.value = kb.id;
+  batchMoveSelectedTargetName.value = kb.name;
+};
+
+const confirmBatchMove = async () => {
+  if (!batchMoveSelectedTargetId.value || batchMoveSubmitting.value) return;
+  const ids = Array.from(selectedIds.value);
+  batchMoveSubmitting.value = true;
+  try {
+    const res: any = await moveKnowledge({
+      knowledge_ids: ids,
+      source_kb_id: kbId.value,
+      target_kb_id: batchMoveSelectedTargetId.value,
+      mode: batchMoveMode.value,
+    });
+    const taskId = res.data?.task_id;
+    MessagePlugin.info(t('knowledgeBase.moveStarted'));
+    batchMoveDialog.value = false;
+    clearSelection();
+
+    if (taskId) {
+      startMovePoll(taskId);
+    } else {
+      page = 1;
+      loadKnowledgeFiles(kbId.value);
+    }
+  } catch (e: any) {
+    MessagePlugin.error(e?.message || t('knowledgeBase.moveFailed'));
+  } finally {
+    batchMoveSubmitting.value = false;
+  }
+};
+
+// Rename document: open dialog, then call PUT /knowledge/:id with new title.
+const handleRenameDocument = (item: KnowledgeCard) => {
+  renameItem.value = item;
+  renameName.value = item.file_name || item.title || '';
+  renameDialog.value = true;
+};
+
+const confirmRenameDocument = async () => {
+  const trimmed = renameName.value.trim();
+  if (!trimmed) return;
+  renameSubmitting.value = true;
+  try {
+    await updateKnowledge(renameItem.value.id, { title: trimmed });
+    MessagePlugin.success(t('knowledgeBase.renameSuccess'));
+    renameDialog.value = false;
+    // Update local list item to reflect new name immediately
+    const idx = (cardList.value || []).findIndex((i: KnowledgeCard) => i.id === renameItem.value.id);
+    if (idx >= 0 && cardList.value) {
+      cardList.value[idx] = { ...cardList.value[idx], file_name: trimmed, title: trimmed };
+    }
+  } catch {
+    MessagePlugin.error(t('knowledgeBase.renameFailed'));
+  } finally {
+    renameSubmitting.value = false;
+  }
+};
+
 // Bridge list-view actions back to existing per-card handlers.
 const handleListAction = (
-  action: 'edit' | 'reparse' | 'move' | 'delete',
+  action: 'edit' | 'rename' | 'reparse' | 'move' | 'delete',
   item: KnowledgeCard,
 ) => {
   const idx = (cardList.value || []).findIndex((i: KnowledgeCard) => i.id === item.id);
   if (action === 'edit') return handleManualEdit(idx, item);
+  if (action === 'rename') return handleRenameDocument(item);
   if (action === 'reparse') return handleKnowledgeReparse(idx, item);
   if (action === 'move') return handleMoveKnowledge(item);
   if (action === 'delete') return delCard(idx, item);
@@ -2217,6 +2343,10 @@ async function createNewSession(value: string): Promise<void> {
                                 <t-icon class="icon" name="edit" />
                                 <span>{{ t('knowledgeBase.editDocument') }}</span>
                               </div>
+                              <div class="card-menu-item" @click.stop="handleRenameDocument(item)">
+                                <t-icon class="icon" name="edit" />
+                                <span>{{ t('knowledgeBase.renameDocument') }}</span>
+                              </div>
                               <div class="card-menu-item" @click.stop="handleKnowledgeReparse(index, item)">
                                 <t-icon class="icon" name="refresh" />
                                 <span>{{ t('knowledgeBase.rebuildDocument') }}</span>
@@ -2415,9 +2545,11 @@ async function createNewSession(value: string): Promise<void> {
             <div class="doc-batch-bar-anchor" v-show="selectedIds.size > 0">
               <DocumentBatchBar
                 :count="selectedIds.size"
-                :loading="batchDeleting"
+                :loading="batchDeleting || batchRebuilding || batchMoveSubmitting"
                 @clear="clearSelection"
                 @delete="openBatchDeleteDialog"
+                @rebuild="openBatchRebuildDialog"
+                @move="openBatchMoveDialog"
               />
             </div>
           </div>
@@ -2480,6 +2612,112 @@ async function createNewSession(value: string): Promise<void> {
             </div>
           </t-dialog>
 
+          <!-- 批量重建知识确认弹窗 -->
+          <t-dialog
+            v-model:visible="batchRebuildDialog"
+            dialogClassName="del-knowledge"
+            :closeBtn="false"
+            :cancelBtn="null"
+            :confirmBtn="null"
+          >
+            <div class="circle-wrap">
+              <div class="header">
+                <img class="circle-img" src="@/assets/img/circle.png" alt="" />
+                <span class="circle-title">{{ t('knowledgeBase.batchRebuildConfirmation') }}</span>
+              </div>
+              <span class="del-circle-txt">
+                {{ t('knowledgeBase.confirmBatchRebuildDocument', { count: selectedIds.size }) }}
+              </span>
+              <div class="circle-btn">
+                <span
+                  class="circle-btn-txt"
+                  :class="{ disabled: batchRebuilding }"
+                  @click="batchRebuilding ? null : (batchRebuildDialog = false)"
+                >
+                  {{ t('common.cancel') }}
+                </span>
+                <span
+                  class="circle-btn-txt confirm"
+                  :class="{ disabled: batchRebuilding }"
+                  @click="confirmBatchRebuild"
+                >
+                  {{ batchRebuilding ? '...' : t('knowledgeBase.rebuildDocument') }}
+                </span>
+              </div>
+            </div>
+          </t-dialog>
+
+          <!-- 批量移动弹窗 -->
+          <t-dialog
+            v-model:visible="batchMoveDialog"
+            :header="t('knowledgeBase.moveToKnowledgeBase')"
+            :confirmBtn="{
+              theme: 'primary',
+              content: t('knowledgeBase.moveConfirm'),
+              loading: batchMoveSubmitting,
+              disabled: !batchMoveSelectedTargetId || batchMoveSubmitting,
+            }"
+            :cancelBtn="{
+              variant: 'outline',
+              content: t('common.cancel'),
+              disabled: batchMoveSubmitting,
+            }"
+            :onConfirm="confirmBatchMove"
+            :onCancel="() => { if (!batchMoveSubmitting) batchMoveDialog = false }"
+            :closeOnOverlayClick="!batchMoveSubmitting"
+            :closeOnEscKeydown="!batchMoveSubmitting"
+            width="480px"
+          >
+            <div class="batch-move-dialog-body">
+              <div v-if="batchMoveTargetsLoading" style="text-align: center; padding: 24px 0;">
+                <t-loading size="small" />
+              </div>
+              <div v-else-if="batchMoveTargets.length === 0" class="batch-move-empty">
+                {{ t('knowledgeBase.moveNoTargets') }}
+              </div>
+              <template v-else>
+                <div class="batch-move-targets">
+                  <div
+                    v-for="kb in batchMoveTargets"
+                    :key="kb.id"
+                    class="batch-move-target-item"
+                    :class="{ active: batchMoveSelectedTargetId === kb.id }"
+                    @click="handleBatchMoveSelectTarget(kb)"
+                  >
+                    <t-icon name="root-list" size="18px" />
+                    <span class="batch-move-target-name">{{ kb.name }}</span>
+                    <span v-if="kb.knowledge_count !== undefined" class="batch-move-target-count">{{ kb.knowledge_count }}</span>
+                  </div>
+                </div>
+                <div v-if="batchMoveSelectedTargetId" class="batch-move-mode">
+                  <div class="batch-move-mode-title">{{ t('knowledgeBase.moveMode') }}</div>
+                  <div
+                    class="batch-move-mode-item"
+                    :class="{ active: batchMoveMode === 'reuse_vectors' }"
+                    @click="batchMoveMode = 'reuse_vectors'"
+                  >
+                    <t-radio :checked="batchMoveMode === 'reuse_vectors'" />
+                    <div class="batch-move-mode-text">
+                      <span class="batch-move-mode-label">{{ t('knowledgeBase.moveModeReuseVectors') }}</span>
+                      <span class="batch-move-mode-desc">{{ t('knowledgeBase.moveModeReuseVectorsDesc') }}</span>
+                    </div>
+                  </div>
+                  <div
+                    class="batch-move-mode-item"
+                    :class="{ active: batchMoveMode === 'reparse' }"
+                    @click="batchMoveMode = 'reparse'"
+                  >
+                    <t-radio :checked="batchMoveMode === 'reparse'" />
+                    <div class="batch-move-mode-text">
+                      <span class="batch-move-mode-label">{{ t('knowledgeBase.moveModeReparse') }}</span>
+                      <span class="batch-move-mode-desc">{{ t('knowledgeBase.moveModeReparseDesc') }}</span>
+                    </div>
+                  </div>
+                </div>
+              </template>
+            </div>
+          </t-dialog>
+
           <!-- 重建知识确认弹窗 -->
           <t-dialog
             v-model:visible="rebuildDialog"
@@ -2503,6 +2741,30 @@ async function createNewSession(value: string): Promise<void> {
                 </span>
               </div>
             </div>
+          </t-dialog>
+
+          <!-- 重命名文档对话框 -->
+          <t-dialog
+            v-model:visible="renameDialog"
+            :header="t('knowledgeBase.renameDialogTitle')"
+            :confirm-btn="{
+              content: t('common.confirm'),
+              theme: 'primary',
+              loading: renameSubmitting,
+              disabled: !renameName.trim(),
+            }"
+            :cancel-btn="{ content: t('common.cancel') }"
+            @confirm="confirmRenameDocument"
+            @close="renameDialog = false"
+            width="460px"
+          >
+            <t-input
+              v-model="renameName"
+              :placeholder="t('knowledgeBase.untitledDocument')"
+              clearable
+              autofocus
+              @keydown.enter="confirmRenameDocument"
+            />
           </t-dialog>
 
           <!-- URL 导入对话框 -->
@@ -3792,6 +4054,107 @@ async function createNewSession(value: string): Promise<void> {
       justify-content: flex-end;
       gap: 8px;
       margin-top: 8px;
+    }
+  }
+}
+
+/* Batch move dialog styles */
+.batch-move-dialog-body {
+  .batch-move-empty {
+    text-align: center;
+    padding: 24px 0;
+    color: var(--td-text-color-placeholder);
+    font-size: 13px;
+  }
+
+  .batch-move-targets {
+    max-height: 240px;
+    overflow-y: auto;
+    border: 1px solid var(--td-component-stroke);
+    border-radius: 8px;
+    margin-bottom: 12px;
+  }
+
+  .batch-move-target-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+    cursor: pointer;
+    border-bottom: 1px solid var(--td-component-stroke);
+    transition: background 0.15s;
+
+    &:last-child {
+      border-bottom: none;
+    }
+
+    &:hover {
+      background: var(--td-bg-color-container-hover);
+    }
+
+    &.active {
+      background: var(--td-brand-color-light);
+    }
+
+    .batch-move-target-name {
+      flex: 1;
+      font-size: 13px;
+      color: var(--td-text-color-primary);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .batch-move-target-count {
+      font-size: 11px;
+      color: var(--td-text-color-placeholder);
+      flex-shrink: 0;
+    }
+  }
+
+  .batch-move-mode {
+    .batch-move-mode-title {
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--td-text-color-secondary);
+      margin-bottom: 8px;
+    }
+
+    .batch-move-mode-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      padding: 8px 10px;
+      border-radius: 8px;
+      cursor: pointer;
+      margin-bottom: 4px;
+      transition: background 0.15s;
+
+      &:hover {
+        background: var(--td-bg-color-container-hover);
+      }
+
+      &.active {
+        background: var(--td-brand-color-light);
+      }
+
+      .batch-move-mode-text {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+
+        .batch-move-mode-label {
+          font-size: 13px;
+          font-weight: 500;
+          color: var(--td-text-color-primary);
+        }
+
+        .batch-move-mode-desc {
+          font-size: 11px;
+          color: var(--td-text-color-placeholder);
+          line-height: 1.4;
+        }
+      }
     }
   }
 }

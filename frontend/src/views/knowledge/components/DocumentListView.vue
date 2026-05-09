@@ -35,7 +35,7 @@ const emit = defineEmits<{
   (e: 'open', item: KnowledgeItem): void;
   (e: 'toggle-row', id: string, checked: boolean, shiftKey: boolean): void;
   (e: 'toggle-all', checked: boolean): void;
-  (e: 'action', action: 'edit' | 'reparse' | 'move' | 'delete', item: KnowledgeItem): void;
+  (e: 'action', action: 'edit' | 'rename' | 'reparse' | 'move' | 'delete', item: KnowledgeItem): void;
 }>();
 
 const { t } = useI18n();
@@ -143,7 +143,7 @@ onBeforeUnmount(() => {
   stickyObserver = null;
 });
 
-const handleAction = (action: 'edit' | 'reparse' | 'move' | 'delete', item: KnowledgeItem) => {
+const handleAction = (action: 'edit' | 'rename' | 'reparse' | 'move' | 'delete', item: KnowledgeItem) => {
   moreOpen.value = null;
   item.isMore = false;
   emit('action', action, item);
@@ -261,6 +261,10 @@ const handleAction = (action: 'edit' | 'reparse' | 'move' | 'delete', item: Know
                 >
                   <t-icon class="icon" name="edit" />
                   <span>{{ t('knowledgeBase.editDocument') }}</span>
+                </div>
+                <div class="row-menu-item" @click.stop="handleAction('rename', item)">
+                  <t-icon class="icon" name="edit" />
+                  <span>{{ t('knowledgeBase.renameDocument') }}</span>
                 </div>
                 <div class="row-menu-item" @click.stop="handleAction('reparse', item)">
                   <t-icon class="icon" name="refresh" />
